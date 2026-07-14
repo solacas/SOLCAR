@@ -12,17 +12,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
 # SECURITY WARNING: keep the secret key used in production secret!
-# Must be supplied via the SECRET_KEY environment variable in production.
-# Only DEBUG runs get a randomly generated fallback (new on every process
-# start, never written to disk) so local development works without an
-# .env file - nothing secret is ever hardcoded in source.
-SECRET_KEY = os.environ.get('SECRET_KEY')
-if not SECRET_KEY:
-    if not DEBUG:
-        raise RuntimeError(
-            'SECRET_KEY environment variable is required when DEBUG=False.'
-        )
-    SECRET_KEY = secrets.token_urlsafe(50)
+# Should be supplied via the SECRET_KEY environment variable in production
+# (set it in Vercel's project env vars). Falls back to a randomly generated,
+# process-local key (never written to disk, nothing hardcoded in source) if
+# it's missing, rather than crashing - Vercel's build runs a settings
+# introspection pass (to discover STATIC_URL/STATIC_ROOT for static-file
+# routing) without any env vars loaded, and this module must stay importable
+# for that to work.
+SECRET_KEY = os.environ.get('SECRET_KEY') or secrets.token_urlsafe(50)
 
 ALLOWED_HOSTS = [h for h in os.environ.get('ALLOWED_HOSTS', '').split(',') if h]
 # Vercel deployments (production + every preview URL)
@@ -52,14 +49,17 @@ INSTALLED_APPS = [
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
-    # must come before staticfiles per django-cloudinary-storage docs
-    'cloudinary_storage',
     'django.contrib.staticfiles',
-    'cloudinary',
     'car.apps.CarConfig',
     'django.contrib.humanize', # used in templates, html files-> adds coma to numbers
     # 'import_export', # import export csv file button in django admin section
     # 'dbbackup',  # django-dbbackup
+    # Deliberately NOT registering 'cloudinary_storage'/'cloudinary' as apps:
+    # MediaCloudinaryStorage (used below) doesn't need app registration to
+    # work as a storage backend, and cloudinary_storage ships a collectstatic
+    # override that silently skips copying any file unless static storage is
+    # also Cloudinary-backed - registering it here made every collectstatic
+    # run (including Vercel's own internal build step) copy zero files.
 ]
 
 # django-dbbackup
@@ -80,6 +80,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Serves STATIC_ROOT directly from the WSGI app - needed because
+    # Vercel's Django runtime doesn't publish a separate static CDN path.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -169,14 +172,20 @@ USE_TZ = True
 
 STATIC_URL = '/static/'
 
-# `manage.py collectstatic` writes here at build time. Vercel's static build
-# step (see build_files.sh / vercel.json) publishes this directory directly
-# from its CDN, so the app server itself never needs to serve static files.
-STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles_build', 'static')
+# `manage.py collectstatic` writes here at build time; WhiteNoise (see
+# MIDDLEWARE) serves this directory straight from the WSGI app in production.
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 STATICFILES_DIRS = [
     os.path.join(BASE_DIR, 'static'),
 ]
+
+# Deliberately the plain Django storage, not one of WhiteNoise's
+# Compressed*/Manifest* variants: those run a build-time post_process step
+# that proved unreliable in Vercel's build container (intermittently
+# reporting freshly-collected files as missing). WhiteNoise's middleware
+# still serves and gzip-compresses static files on the fly at request time
+# regardless of which storage class collectstatic used to write them.
 
 
 # Media files (user-uploaded car photos)
